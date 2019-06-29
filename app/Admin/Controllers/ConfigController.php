@@ -18,32 +18,46 @@ class ConfigController extends Controller
 {
     public function system(Content $content,Request $request)
     {
+        $app = config('system');
+        $array = [];
         if ($request->isMethod('post')){
             $input = $request->post();
-            $validator = Validator::make(
-                $input,
-                [
-                    'name' => 'required',
-                    'logo' => 'required',
-                    'miniLogo' => 'required'
-                ],
-                [
-                    'name.required' => "名字不能为空",
-                    'logo.required' => "管理面板标题不能为空",
-                    'miniLogo.required' => "迷你标题不能为空"
-                ]);
-            if ($validator->fails()){
-                return redirect('/admin/config/system')->withErrors($validator->errors())->withInput();
+
+            switch ($request->get('t')){
+                case 'system':
+                    $validator = Validator::make(
+                        $input,
+                        [
+                            'name' => 'required',
+                            'logo' => 'required',
+                            'miniLogo' => 'required'
+                        ],
+                        [
+                            'name.required' => "名字不能为空",
+                            'logo.required' => "管理面板标题不能为空",
+                            'miniLogo.required' => "迷你标题不能为空"
+                        ]);
+                    if ($validator->fails()){
+                        return redirect('/admin/config/system')->withErrors($validator->errors())->withInput();
+                    }
+                    $pat = ['name','logo','logo-mini'];
+                    $rep = [$input['name'],$input['logo'],$input['miniLogo']];
+                    break;
+
             }
-            $pat = ['name'];
-            $rep = [$input['name']];
-            if (setconfig($pat,$rep,$input['file'])){
-                admin_toastr('配置成功','success');
+            if (setconfig($pat,$rep,$input['file'],$array)){
+                return redirect('/admin/config/system');
             };
         }
+
         $content->header('系统配置');
         $content->description('列表');
-        $content->row(view('admin.config.system',['config'=>config('admin')]));
+        $content->row(view('admin.config.system',[
+            'config'=>config('admin'),
+            'app'=>$app,
+            'user' => config('user'),
+        ]));
+
         return $content;
     }
 }

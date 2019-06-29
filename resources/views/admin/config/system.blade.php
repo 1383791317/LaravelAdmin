@@ -17,7 +17,7 @@
         </div>
         <!-- /.box-header -->
         <!-- form start -->
-        <form role="form" method="post">
+        <form role="form" method="post" action="/admin/config/system?t=system">
             <div class="box-body">
                 <input type="hidden" name="file" value="admin">
                 <div class="form-group {!! !$errors->has('appName') ? '' : 'has-error' !!}">
@@ -41,4 +41,5 @@
             </div>
         </form>
     </div>
+
 </div>
