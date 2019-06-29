@@ -1,22 +1,23 @@
 <div class="box">
-    <div class="box-header">
+    @if(isset($title))
+        <div class="box-header with-border">
+            <h3 class="box-title"> {{ $title }}</h3>
+        </div>
+    @endif
 
-        <h3 class="box-title"></h3>
-
-        <span style="position: absolute;left: 10px;top: 5px;">
-            {!! $grid->renderHeaderTools() !!}
-        </span>
-
-        <div class="box-tools">
-            {!! $grid->renderFilter() !!}
+    <div class="box-header with-border">
+        <div class="pull-right">
             {!! $grid->renderExportButton() !!}
             {!! $grid->renderCreateButton() !!}
         </div>
-
+        <span>
+            {!! $grid->renderHeaderTools() !!}
+        </span>
     </div>
-    <!-- /.box-header -->
 
-    <div class="box-footer">
+    {!! $grid->renderFilter() !!}
+
+    <div class="box-body table-responsive no-padding">
         <ul class="mailbox-attachments clearfix">
             @foreach($grid->rows() as $row)
                 <li>
@@ -31,7 +32,7 @@
                         <span class="mailbox-attachment-size">
                           <input type="checkbox" class="grid-item" data-id="{{ $row->id() }}" />
                             <span class="pull-right">
-                                {!! $row->column('__actions__') !!}
+                                {!! $row->column(\Encore\Admin\Grid\Column::ACTION_COLUMN_NAME) !!}
                                 <a href="{!! isset($server) ? $server . '/' . $row->column($image_column) : \Illuminate\Support\Facades\Storage::disk(config('admin.upload.disk'))->url($row->column($image_column)) !!}" target="_blank" download="custom-filename.jpg">
                                     <i class="fa fa-cloud-download"></i>
                                 </a>

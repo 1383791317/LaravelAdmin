@@ -2,15 +2,19 @@
 
 namespace Encore\Admin\Grid;
 
+use Encore\Admin\Grid;
 use Encore\Admin\Middleware\Pjax;
 use Illuminate\Database\Eloquent\Model as EloquentModel;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Input;
 use Illuminate\Support\Facades\Request;
+use Illuminate\Support\Str;
 
 class Model
 {
@@ -20,6 +24,11 @@ class Model
      * @var EloquentModel
      */
     protected $model;
+
+    /**
+     * @var EloquentModel
+     */
+    protected $originalModel;
 
     /**
      * Array of queries of the eloquent model.
@@ -76,13 +85,33 @@ class Model
     protected $collectionCallback;
 
     /**
+     * @var Grid
+     */
+    protected $grid;
+
+    /**
+     * @var Relation
+     */
+    protected $relation;
+
+    /**
+     * @var array
+     */
+    protected $eagerLoads = [];
+
+    /**
      * Create a new grid model instance.
      *
      * @param EloquentModel $model
+     * @param Grid          $grid
      */
-    public function __construct(EloquentModel $model)
+    public function __construct(EloquentModel $model, Grid $grid = null)
     {
         $this->model = $model;
+
+        $this->originalModel = $model;
+
+        $this->grid = $grid;
 
         $this->queries = collect();
 
@@ -101,6 +130,14 @@ class Model
         $class = get_class($model);
 
         $class::$snakeAttributes = false;
+    }
+
+    /**
+     * @return EloquentModel
+     */
+    public function getOriginalModel()
+    {
+        return $this->originalModel;
     }
 
     /**
@@ -148,6 +185,32 @@ class Model
     }
 
     /**
+     * Get per-page number.
+     *
+     * @return int
+     */
+    public function getPerPage()
+    {
+        return $this->perPage;
+    }
+
+    /**
+     * Set per-page number.
+     *
+     * @param int $perPage
+     *
+     * @return $this
+     */
+    public function setPerPage($perPage)
+    {
+        $this->perPage = $perPage;
+
+        $this->__call('paginate', [$perPage]);
+
+        return $this;
+    }
+
+    /**
      * Get the query string variable used to store the sort.
      *
      * @return string
@@ -169,6 +232,66 @@ class Model
         $this->sortName = $name;
 
         return $this;
+    }
+
+    /**
+     * Set parent grid instance.
+     *
+     * @param Grid $grid
+     *
+     * @return $this
+     */
+    public function setGrid(Grid $grid)
+    {
+        $this->grid = $grid;
+
+        return $this;
+    }
+
+    /**
+     * Get parent gird instance.
+     *
+     * @return Grid
+     */
+    public function getGrid()
+    {
+        return $this->grid;
+    }
+
+    /**
+     * @param Relation $relation
+     *
+     * @return $this
+     */
+    public function setRelation(Relation $relation)
+    {
+        $this->relation = $relation;
+
+        return $this;
+    }
+
+    /**
+     * @return Relation
+     */
+    public function getRelation()
+    {
+        return $this->relation;
+    }
+
+    /**
+     * Get constraints.
+     *
+     * @return array|bool
+     */
+    public function getConstraints()
+    {
+        if ($this->relation instanceof HasMany) {
+            return [
+                $this->relation->getForeignKeyName() => $this->relation->getParentKey(),
+            ];
+        }
+
+        return false;
     }
 
     /**
@@ -271,6 +394,10 @@ class Model
             return $this->model;
         }
 
+        if ($this->relation) {
+            $this->model = $this->relation->getQuery();
+        }
+
         $this->setSort();
         $this->setPaginate();
 
@@ -289,6 +416,28 @@ class Model
         }
 
         throw new \Exception('Grid query error');
+    }
+
+    /**
+     * @return \Illuminate\Database\Eloquent\Builder|EloquentModel
+     */
+    public function getQueryBuilder()
+    {
+        if ($this->relation) {
+            return $this->relation->getQuery();
+        }
+
+        $this->setSort();
+
+        $queryBuilder = $this->originalModel;
+
+        $this->queries->reject(function ($query) {
+            return in_array($query['method'], ['get', 'paginate']);
+        })->each(function ($query) use (&$queryBuilder) {
+            $queryBuilder = $queryBuilder->{$query['method']}(...$query['arguments']);
+        });
+
+        return $queryBuilder;
     }
 
     /**
@@ -346,7 +495,7 @@ class Model
      */
     protected function resolvePerPage($paginate)
     {
-        if ($perPage = app('request')->input($this->perPageName)) {
+        if ($perPage = request($this->perPageName)) {
             if (is_array($paginate)) {
                 $paginate['arguments'][0] = (int) $perPage;
 
@@ -358,6 +507,10 @@ class Model
 
         if (isset($paginate['arguments'][0])) {
             return $paginate['arguments'];
+        }
+
+        if ($name = $this->grid->getName()) {
+            return [$this->perPage, ['*'], "{$name}_page"];
         }
 
         return [$this->perPage];
@@ -393,14 +546,25 @@ class Model
             return;
         }
 
-        if (str_contains($this->sort['column'], '.')) {
+        if (Str::contains($this->sort['column'], '.')) {
             $this->setRelationSort($this->sort['column']);
         } else {
             $this->resetOrderBy();
 
+            // get column. if contains "cast", set set column as cast
+            if (!empty($this->sort['cast'])) {
+                $column = "CAST({$this->sort['column']} AS {$this->sort['cast']}) {$this->sort['type']}";
+                $method = 'orderByRaw';
+                $arguments = [$column];
+            } else {
+                $column = $this->sort['column'];
+                $method = 'orderBy';
+                $arguments = [$column, $this->sort['type']];
+            }
+
             $this->queries->push([
-                'method'    => 'orderBy',
-                'arguments' => [$this->sort['column'], $this->sort['type']],
+                'method'    => $method,
+                'arguments' => $arguments,
             ]);
         }
     }
@@ -420,6 +584,11 @@ class Model
             return $query['method'] == 'with' && in_array($relationName, $query['arguments']);
         })) {
             $relation = $this->model->$relationName();
+
+            $this->queries->push([
+                'method'    => 'select',
+                'arguments' => [$this->model->getTable().'.*'],
+            ]);
 
             $this->queries->push([
                 'method'    => 'join',
@@ -466,9 +635,11 @@ class Model
         $relatedTable = $relation->getRelated()->getTable();
 
         if ($relation instanceof BelongsTo) {
+            $foreignKeyMethod = (app()->version() < '5.8.0') ? 'getForeignKey' : 'getForeignKeyName';
+
             return [
                 $relatedTable,
-                $relation->getForeignKey(),
+                $relation->{$foreignKeyMethod}(),
                 '=',
                 $relatedTable.'.'.$relation->getRelated()->getKeyName(),
             ];
@@ -500,6 +671,42 @@ class Model
         ]);
 
         return $this;
+    }
+
+    /**
+     * Set the relationships that should be eager loaded.
+     *
+     * @param mixed $relations
+     *
+     * @return $this|Model
+     */
+    public function with($relations)
+    {
+        if (is_array($relations)) {
+            if (Arr::isAssoc($relations)) {
+                $relations = array_keys($relations);
+            }
+
+            $this->eagerLoads = array_merge($this->eagerLoads, $relations);
+        }
+
+        if (is_string($relations)) {
+            if (Str::contains($relations, '.')) {
+                $relations = explode('.', $relations)[0];
+            }
+
+            if (Str::contains($relations, ':')) {
+                $relations = explode(':', $relations)[0];
+            }
+
+            if (in_array($relations, $this->eagerLoads)) {
+                return $this;
+            }
+
+            $this->eagerLoads[] = $relations;
+        }
+
+        return $this->__call('with', (array) $relations);
     }
 
     /**

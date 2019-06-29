@@ -6,15 +6,16 @@ use Closure;
 use Encore\Admin\Exception\Handler;
 use Encore\Admin\Form\Builder;
 use Encore\Admin\Form\Field;
-use Encore\Admin\Form\Field\File;
+use Encore\Admin\Form\HasHooks;
 use Encore\Admin\Form\Row;
 use Encore\Admin\Form\Tab;
+use Illuminate\Contracts\Support\Renderable;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Database\Eloquent\Relations;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Input;
 use Illuminate\Support\MessageBag;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Validator;
@@ -38,8 +39,6 @@ use Symfony\Component\HttpFoundation\Response;
  * @method Field\Email          email($column, $label = '')
  * @method Field\Mobile         mobile($column, $label = '')
  * @method Field\Slider         slider($column, $label = '')
- * @method Field\Map            map($latitude, $longitude, $label = '')
- * @method Field\Editor         editor($column, $label = '')
  * @method Field\File           file($column, $label = '')
  * @method Field\Image          image($column, $label = '')
  * @method Field\Date           date($column, $label = '')
@@ -52,24 +51,35 @@ use Symfony\Component\HttpFoundation\Response;
  * @method Field\TimeRange      timeRange($start, $end, $label = '')
  * @method Field\Number         number($column, $label = '')
  * @method Field\Currency       currency($column, $label = '')
- * @method Field\HasMany        hasMany($relationName, $callback)
+ * @method Field\HasMany        hasMany($relationName, $label = '', $callback)
  * @method Field\SwitchField    switch($column, $label = '')
  * @method Field\Display        display($column, $label = '')
  * @method Field\Rate           rate($column, $label = '')
- * @method Field\Divide         divider()
+ * @method Field\Divider        divider($title = '')
  * @method Field\Password       password($column, $label = '')
  * @method Field\Decimal        decimal($column, $label = '')
  * @method Field\Html           html($html, $label = '')
  * @method Field\Tags           tags($column, $label = '')
  * @method Field\Icon           icon($column, $label = '')
- * @method Field\Embeds         embeds($column, $label = '')
+ * @method Field\Embeds         embeds($column, $label = '', $callback)
  * @method Field\MultipleImage  multipleImage($column, $label = '')
  * @method Field\MultipleFile   multipleFile($column, $label = '')
  * @method Field\Captcha        captcha($column, $label = '')
  * @method Field\Listbox        listbox($column, $label = '')
+ * @method Field\Table          table($column, $label, $builder)
+ * @method Field\Timezone       timezone($column, $label = '')
+ * @method Field\KeyValue       keyValue($column, $label = '')
+ * @method Field\ListField      list($column, $label = '')
  */
-class Form
+class Form implements Renderable
 {
+    use HasHooks;
+
+    /**
+     * Remove flag in `has many` form.
+     */
+    const REMOVE_FLAG_NAME = '_remove_';
+
     /**
      * Eloquent model of the form.
      *
@@ -86,27 +96,6 @@ class Form
      * @var Builder
      */
     protected $builder;
-
-    /**
-     * Submitted callback.
-     *
-     * @var Closure
-     */
-    protected $submitted;
-
-    /**
-     * Saving callback.
-     *
-     * @var Closure
-     */
-    protected $saving;
-
-    /**
-     * Saved callback.
-     *
-     * @var Closure
-     */
-    protected $saved;
 
     /**
      * Data for save to current model from input.
@@ -137,6 +126,13 @@ class Form
     public static $availableFields = [];
 
     /**
+     * Form field alias.
+     *
+     * @var array
+     */
+    public static $fieldAlias = [];
+
+    /**
      * Ignored saving fields.
      *
      * @var array
@@ -156,11 +152,6 @@ class Form
     protected $tab = null;
 
     /**
-     * Remove flag in `has many` form.
-     */
-    const REMOVE_FLAG_NAME = '_remove_';
-
-    /**
      * Field rows in form.
      *
      * @var array
@@ -168,18 +159,60 @@ class Form
     public $rows = [];
 
     /**
+     * @var bool
+     */
+    protected $isSoftDeletes = false;
+
+    /**
+     * Initialization closure array.
+     *
+     * @var []Closure
+     */
+    protected static $initCallbacks;
+
+    /**
      * Create a new form instance.
      *
      * @param $model
      * @param \Closure $callback
      */
-    public function __construct($model, Closure $callback)
+    public function __construct($model, Closure $callback = null)
     {
         $this->model = $model;
 
         $this->builder = new Builder($this);
 
-        $callback($this);
+        if ($callback instanceof Closure) {
+            $callback($this);
+        }
+
+        $this->isSoftDeletes = in_array(SoftDeletes::class, class_uses_deep($this->model));
+
+        $this->callInitCallbacks();
+    }
+
+    /**
+     * Initialize with user pre-defined default disables, etc.
+     *
+     * @param Closure $callback
+     */
+    public static function init(Closure $callback = null)
+    {
+        static::$initCallbacks[] = $callback;
+    }
+
+    /**
+     * Call the initialization closure array in sequence.
+     */
+    protected function callInitCallbacks()
+    {
+        if (empty(static::$initCallbacks)) {
+            return;
+        }
+
+        foreach (static::$initCallbacks as $callback) {
+            call_user_func($callback, $this);
+        }
     }
 
     /**
@@ -230,21 +263,6 @@ class Form
     }
 
     /**
-     * @param $id
-     *
-     * @return $this
-     */
-    public function view($id)
-    {
-        $this->builder->setMode(Builder::MODE_VIEW);
-        $this->builder->setResourceId($id);
-
-        $this->setFieldValue($id);
-
-        return $this;
-    }
-
-    /**
      * Use tab to split form.
      *
      * @param string  $title
@@ -282,32 +300,67 @@ class Form
      */
     public function destroy($id)
     {
-        $ids = explode(',', $id);
-
-        foreach ($ids as $id) {
-            if (empty($id)) {
-                continue;
+        try {
+            if (($ret = $this->callDeleting($id)) instanceof Response) {
+                return $ret;
             }
-            $this->deleteFilesAndImages($id);
-            $this->model->find($id)->delete();
+
+            collect(explode(',', $id))->filter()->each(function ($id) {
+                $builder = $this->model()->newQuery();
+
+                if ($this->isSoftDeletes) {
+                    $builder = $builder->withTrashed();
+                }
+
+                $model = $builder->with($this->getRelations())->findOrFail($id);
+
+                if ($this->isSoftDeletes && $model->trashed()) {
+                    $this->deleteFiles($model, true);
+                    $model->forceDelete();
+
+                    return;
+                }
+
+                $this->deleteFiles($model);
+                $model->delete();
+            });
+
+            if (($ret = $this->callDeleted()) instanceof Response) {
+                return $ret;
+            }
+
+            $response = [
+                'status'  => true,
+                'message' => trans('admin.delete_succeeded'),
+            ];
+        } catch (\Exception $exception) {
+            $response = [
+                'status'  => false,
+                'message' => $exception->getMessage() ?: trans('admin.delete_failed'),
+            ];
         }
 
-        return true;
+        return response()->json($response);
     }
 
     /**
-     * Remove files or images in record.
+     * Remove files in record.
      *
-     * @param $id
+     * @param Model $model
+     * @param bool  $forceDelete
      */
-    protected function deleteFilesAndImages($id)
+    protected function deleteFiles(Model $model, $forceDelete = false)
     {
-        $data = $this->model->with($this->getRelations())
-            ->findOrFail($id)->toArray();
+        // If it's a soft delete, the files in the data will not be deleted.
+        if (!$forceDelete && $this->isSoftDeletes) {
+            return;
+        }
+
+        $data = $model->toArray();
 
         $this->builder->fields()->filter(function ($field) {
             return $field instanceof Field\File;
-        })->each(function (File $file) use ($data) {
+        })->each(function (Field\File $file) use ($data) {
             $file->setOriginal($data);
 
             $file->destroy();
@@ -321,7 +374,7 @@ class Form
      */
     public function store()
     {
-        $data = Input::all();
+        $data = \request()->all();
 
         // Handle validation errors.
         if ($validationMessages = $this->validationMessages($data)) {
@@ -344,7 +397,7 @@ class Form
             $this->updateRelation($this->relations);
         });
 
-        if (($response = $this->complete($this->saved)) instanceof Response) {
+        if (($response = $this->callSaved()) instanceof Response) {
             return $response;
         }
 
@@ -353,20 +406,6 @@ class Form
         }
 
         return $this->redirectAfterStore();
-    }
-
-    /**
-     * Get RedirectResponse after store.
-     *
-     * @return \Illuminate\Http\RedirectResponse
-     */
-    protected function redirectAfterStore()
-    {
-        admin_toastr(trans('admin.save_succeeded'));
-
-        $url = Input::get(Builder::PREVIOUS_URL_KEY) ?: $this->resource(0);
-
-        return redirect($url);
     }
 
     /**
@@ -404,7 +443,7 @@ class Form
             return $response;
         }
 
-        $this->inputs = $this->removeIgnoredFields($data);
+        $this->inputs = array_merge($this->removeIgnoredFields($data), $this->inputs);
 
         if (($response = $this->callSaving()) instanceof Response) {
             return $response;
@@ -412,7 +451,7 @@ class Form
 
         $this->relations = $this->getRelationInputs($this->inputs);
 
-        $this->updates = array_except($this->inputs, array_keys($this->relations));
+        $this->updates = Arr::except($this->inputs, array_keys($this->relations));
     }
 
     /**
@@ -424,7 +463,7 @@ class Form
      */
     protected function removeIgnoredFields($input)
     {
-        array_forget($input, $this->ignored);
+        Arr::forget($input, $this->ignored);
 
         return $input;
     }
@@ -441,12 +480,14 @@ class Form
         $relations = [];
 
         foreach ($inputs as $column => $value) {
-            if (method_exists($this->model, $column)) {
-                $relation = call_user_func([$this->model, $column]);
+            if (!method_exists($this->model, $column)) {
+                continue;
+            }
 
-                if ($relation instanceof Relation) {
-                    $relations[$column] = $value;
-                }
+            $relation = call_user_func([$this->model, $column]);
+
+            if ($relation instanceof Relations\Relation) {
+                $relations[$column] = $value;
             }
         }
 
@@ -454,69 +495,31 @@ class Form
     }
 
     /**
-     * Call submitted callback.
-     *
-     * @return mixed
-     */
-    protected function callSubmitted()
-    {
-        if ($this->submitted instanceof Closure) {
-            return call_user_func($this->submitted, $this);
-        }
-    }
-
-    /**
-     * Call saving callback.
-     *
-     * @return mixed
-     */
-    protected function callSaving()
-    {
-        if ($this->saving instanceof Closure) {
-            return call_user_func($this->saving, $this);
-        }
-    }
-
-    /**
-     * Callback after saving a Model.
-     *
-     * @param Closure|null $callback
-     *
-     * @return mixed|null
-     */
-    protected function complete(Closure $callback = null)
-    {
-        if ($callback instanceof Closure) {
-            return $callback($this);
-        }
-    }
-
-    /**
      * Handle update.
      *
-     * @param int $id
+     * @param int  $id
+     * @param null $data
      *
-     * @return \Symfony\Component\HttpFoundation\Response
+     * @return bool|\Illuminate\Contracts\Routing\ResponseFactory|\Illuminate\Http\JsonResponse|\Illuminate\Http\RedirectResponse|\Illuminate\Http\Response|mixed|null|Response
      */
     public function update($id, $data = null)
     {
-        $data = ($data) ?: Input::all();
+        $data = ($data) ?: request()->all();
 
         $isEditable = $this->isEditable($data);
 
-        $data = $this->handleEditable($data);
-
-        $data = $this->handleFileDelete($data);
-
-        if ($this->handleOrderable($id, $data)) {
-            return response([
-                'status'  => true,
-                'message' => trans('admin.update_succeeded'),
-            ]);
+        if (($data = $this->handleColumnUpdates($id, $data)) instanceof Response) {
+            return $data;
         }
 
         /* @var Model $this->model */
-        $this->model = $this->model->with($this->getRelations())->findOrFail($id);
+        $builder = $this->model();
+
+        if ($this->isSoftDeletes) {
+            $builder = $builder->withTrashed();
+        }
+
+        $this->model = $builder->with($this->getRelations())->findOrFail($id);
 
         $this->setFieldOriginalValue();
 
@@ -524,9 +527,9 @@ class Form
         if ($validationMessages = $this->validationMessages($data)) {
             if (!$isEditable) {
                 return back()->withInput()->withErrors($validationMessages);
-            } else {
-                return response()->json(['errors' => array_dot($validationMessages->getMessages())], 422);
             }
+
+            return response()->json(['errors' => Arr::dot($validationMessages->getMessages())], 422);
         }
 
         if (($response = $this->prepare($data)) instanceof Response) {
@@ -546,7 +549,7 @@ class Form
             $this->updateRelation($this->relations);
         });
 
-        if (($result = $this->complete($this->saved)) instanceof Response) {
+        if (($result = $this->callSaved()) instanceof Response) {
             return $result;
         }
 
@@ -554,19 +557,61 @@ class Form
             return $response;
         }
 
-        return $this->redirectAfterUpdate();
+        return $this->redirectAfterUpdate($id);
+    }
+
+    /**
+     * Get RedirectResponse after store.
+     *
+     * @return \Illuminate\Http\RedirectResponse
+     */
+    protected function redirectAfterStore()
+    {
+        $resourcesPath = $this->resource(0);
+
+        $key = $this->model->getKey();
+
+        return $this->redirectAfterSaving($resourcesPath, $key);
     }
 
     /**
      * Get RedirectResponse after update.
      *
+     * @param mixed $key
+     *
      * @return \Illuminate\Http\RedirectResponse
      */
-    protected function redirectAfterUpdate()
+    protected function redirectAfterUpdate($key)
     {
-        admin_toastr(trans('admin.update_succeeded'));
+        $resourcesPath = $this->resource(-1);
 
-        $url = Input::get(Builder::PREVIOUS_URL_KEY) ?: $this->resource(-1);
+        return $this->redirectAfterSaving($resourcesPath, $key);
+    }
+
+    /**
+     * Get RedirectResponse after data saving.
+     *
+     * @param string $resourcesPath
+     * @param string $key
+     *
+     * @return \Illuminate\Http\RedirectResponse|\Illuminate\Routing\Redirector
+     */
+    protected function redirectAfterSaving($resourcesPath, $key)
+    {
+        if (request('after-save') == 1) {
+            // continue editing
+            $url = rtrim($resourcesPath, '/')."/{$key}/edit";
+        } elseif (request('after-save') == 2) {
+            // continue creating
+            $url = rtrim($resourcesPath, '/').'/create';
+        } elseif (request('after-save') == 3) {
+            // view resource
+            $url = rtrim($resourcesPath, '/')."/{$key}";
+        } else {
+            $url = request(Builder::PREVIOUS_URL_KEY) ?: $resourcesPath;
+        }
+
+        admin_toastr(trans('admin.save_succeeded'));
 
         return redirect($url);
     }
@@ -584,6 +629,32 @@ class Form
     }
 
     /**
+     * Handle updates for single column.
+     *
+     * @param int   $id
+     * @param array $data
+     *
+     * @return array|\Illuminate\Contracts\Routing\ResponseFactory|\Illuminate\Http\Response|Response
+     */
+    protected function handleColumnUpdates($id, $data)
+    {
+        $data = $this->handleEditable($data);
+
+        $data = $this->handleFileDelete($data);
+
+        $data = $this->handleFileSort($data);
+
+        if ($this->handleOrderable($id, $data)) {
+            return response([
+                'status'  => true,
+                'message' => trans('admin.update_succeeded'),
+            ]);
+        }
+
+        return $data;
+    }
+
+    /**
      * Handle editable update.
      *
      * @param array $input
@@ -596,8 +667,8 @@ class Form
             $name = $input['name'];
             $value = $input['value'];
 
-            array_forget($input, ['pk', 'value', 'name']);
-            array_set($input, $name, $value);
+            Arr::forget($input, ['pk', 'value', 'name']);
+            Arr::set($input, $name, $value);
         }
 
         return $input;
@@ -615,7 +686,33 @@ class Form
             unset($input['key']);
         }
 
-        Input::replace($input);
+        request()->replace($input);
+
+        return $input;
+    }
+
+    /**
+     * @param array $input
+     *
+     * @return array
+     */
+    protected function handleFileSort(array $input = [])
+    {
+        if (!array_key_exists(Field::FILE_SORT_FLAG, $input)) {
+            return $input;
+        }
+
+        $sorts = array_filter($input[Field::FILE_SORT_FLAG]);
+
+        if (empty($sorts)) {
+            return $input;
+        }
+
+        foreach ($sorts as $column => $order) {
+            $input[$column] = $order;
+        }
+
+        request()->replace($input);
 
         return $input;
     }
@@ -659,8 +756,9 @@ class Form
 
             $relation = $this->model->$name();
 
-            $oneToOneRelation = $relation instanceof \Illuminate\Database\Eloquent\Relations\HasOne
-                || $relation instanceof \Illuminate\Database\Eloquent\Relations\MorphOne;
+            $oneToOneRelation = $relation instanceof Relations\HasOne
+                || $relation instanceof Relations\MorphOne
+                || $relation instanceof Relations\BelongsTo;
 
             $prepared = $this->prepareUpdate([$name => $values], $oneToOneRelation);
 
@@ -668,21 +766,23 @@ class Form
                 continue;
             }
 
-            switch (get_class($relation)) {
-                case \Illuminate\Database\Eloquent\Relations\BelongsToMany::class:
-                case \Illuminate\Database\Eloquent\Relations\MorphToMany::class:
+            switch (true) {
+                case $relation instanceof Relations\BelongsToMany:
+                case $relation instanceof Relations\MorphToMany:
                     if (isset($prepared[$name])) {
                         $relation->sync($prepared[$name]);
                     }
                     break;
-                case \Illuminate\Database\Eloquent\Relations\HasOne::class:
+                case $relation instanceof Relations\HasOne:
 
                     $related = $this->model->$name;
 
                     // if related is empty
                     if (is_null($related)) {
                         $related = $relation->getRelated();
-                        $related->{$relation->getForeignKeyName()} = $this->model->{$this->model->getKeyName()};
+                        $qualifiedParentKeyName = $relation->getQualifiedParentKeyName();
+                        $localKey = Arr::last(explode('.', $qualifiedParentKeyName));
+                        $related->{$relation->getForeignKeyName()} = $this->model->{$localKey};
                     }
 
                     foreach ($prepared[$name] as $column => $value) {
@@ -691,7 +791,32 @@ class Form
 
                     $related->save();
                     break;
-                case \Illuminate\Database\Eloquent\Relations\MorphOne::class:
+                case $relation instanceof Relations\BelongsTo:
+                case $relation instanceof Relations\MorphTo:
+
+                    $parent = $this->model->$name;
+
+                    // if related is empty
+                    if (is_null($parent)) {
+                        $parent = $relation->getRelated();
+                    }
+
+                    foreach ($prepared[$name] as $column => $value) {
+                        $parent->setAttribute($column, $value);
+                    }
+
+                    $parent->save();
+
+                    // When in creating, associate two models
+                    $foreignKeyMethod = (app()->version() < '5.8.0') ? 'getForeignKey' : 'getForeignKeyName';
+                    if (!$this->model->{$relation->{$foreignKeyMethod}()}) {
+                        $this->model->{$relation->{$foreignKeyMethod}()} = $parent->getKey();
+
+                        $this->model->save();
+                    }
+
+                    break;
+                case $relation instanceof Relations\MorphOne:
                     $related = $this->model->$name;
                     if (is_null($related)) {
                         $related = $relation->make();
@@ -701,15 +826,16 @@ class Form
                     }
                     $related->save();
                     break;
-                case \Illuminate\Database\Eloquent\Relations\HasMany::class:
-                case \Illuminate\Database\Eloquent\Relations\MorphMany::class:
+                case $relation instanceof Relations\HasMany:
+                case $relation instanceof Relations\MorphMany:
 
                     foreach ($prepared[$name] as $related) {
+                        /** @var Relations\Relation $relation */
                         $relation = $this->model()->$name();
 
                         $keyName = $relation->getRelated()->getKeyName();
 
-                        $instance = $relation->findOrNew(array_get($related, $keyName));
+                        $instance = $relation->findOrNew(Arr::get($related, $keyName));
 
                         if ($related[static::REMOVE_FLAG_NAME] == 1) {
                             $instance->delete();
@@ -717,7 +843,7 @@ class Form
                             continue;
                         }
 
-                        array_forget($related, static::REMOVE_FLAG_NAME);
+                        Arr::forget($related, static::REMOVE_FLAG_NAME);
 
                         $instance->fill($related);
 
@@ -741,15 +867,16 @@ class Form
     {
         $prepared = [];
 
+        /** @var Field $field */
         foreach ($this->builder->fields() as $field) {
             $columns = $field->column();
 
             // If column not in input array data, then continue.
-            if (!array_has($updates, $columns)) {
+            if (!Arr::has($updates, $columns)) {
                 continue;
             }
 
-            if ($this->invalidColumn($columns, $oneToOneRelation)) {
+            if ($this->isInvalidColumn($columns, $oneToOneRelation || $field->isJsonType)) {
                 continue;
             }
 
@@ -759,10 +886,10 @@ class Form
 
             if (is_array($columns)) {
                 foreach ($columns as $name => $column) {
-                    array_set($prepared, $column, $value[$name]);
+                    Arr::set($prepared, $column, $value[$name]);
                 }
             } elseif (is_string($columns)) {
-                array_set($prepared, $columns, $value);
+                Arr::set($prepared, $columns, $value);
             }
         }
 
@@ -771,15 +898,15 @@ class Form
 
     /**
      * @param string|array $columns
-     * @param bool         $oneToOneRelation
+     * @param bool         $containsDot
      *
      * @return bool
      */
-    protected function invalidColumn($columns, $oneToOneRelation = false)
+    protected function isInvalidColumn($columns, $containsDot = false)
     {
         foreach ((array) $columns as $column) {
-            if ((!$oneToOneRelation && Str::contains($column, '.')) ||
-                ($oneToOneRelation && !Str::contains($column, '.'))) {
+            if ((!$containsDot && Str::contains($column, '.')) ||
+                ($containsDot && !Str::contains($column, '.'))) {
                 return true;
             }
         }
@@ -797,7 +924,7 @@ class Form
     protected function prepareInsert($inserts)
     {
         if ($this->isHasOneRelation($inserts)) {
-            $inserts = array_dot($inserts);
+            $inserts = Arr::dot($inserts);
         }
 
         foreach ($inserts as $column => $value) {
@@ -812,7 +939,7 @@ class Form
         $prepared = [];
 
         foreach ($inserts as $key => $value) {
-            array_set($prepared, $key, $value);
+            Arr::set($prepared, $key, $value);
         }
 
         return $prepared;
@@ -841,42 +968,6 @@ class Form
     }
 
     /**
-     * Set submitted callback.
-     *
-     * @param Closure $callback
-     *
-     * @return void
-     */
-    public function submitted(Closure $callback)
-    {
-        $this->submitted = $callback;
-    }
-
-    /**
-     * Set saving callback.
-     *
-     * @param Closure $callback
-     *
-     * @return void
-     */
-    public function saving(Closure $callback)
-    {
-        $this->saving = $callback;
-    }
-
-    /**
-     * Set saved callback.
-     *
-     * @param callable $callback
-     *
-     * @return void
-     */
-    public function saved(Closure $callback)
-    {
-        $this->saved = $callback;
-    }
-
-    /**
      * Ignore fields to save.
      *
      * @param string|array $fields
@@ -899,16 +990,16 @@ class Form
     protected function getDataByColumn($data, $columns)
     {
         if (is_string($columns)) {
-            return array_get($data, $columns);
+            return Arr::get($data, $columns);
         }
 
         if (is_array($columns)) {
             $value = [];
             foreach ($columns as $name => $column) {
-                if (!array_has($data, $column)) {
+                if (!Arr::has($data, $column)) {
                     continue;
                 }
-                $value[$name] = array_get($data, $column);
+                $value[$name] = Arr::get($data, $column);
             }
 
             return $value;
@@ -962,7 +1053,15 @@ class Form
     {
         $relations = $this->getRelations();
 
-        $this->model = $this->model->with($relations)->findOrFail($id);
+        $builder = $this->model();
+
+        if ($this->isSoftDeletes) {
+            $builder = $builder->withTrashed();
+        }
+
+        $this->model = $builder->with($relations)->findOrFail($id);
+
+        $this->callEditing();
 
 //        static::doNotSnakeAttributes($this->model);
 
@@ -973,6 +1072,27 @@ class Form
                 $field->fill($data);
             }
         });
+    }
+
+    /**
+     * Add a fieldset to form.
+     *
+     * @param string  $title
+     * @param Closure $setCallback
+     *
+     * @return Field\Fieldset
+     */
+    public function fieldset(string $title, Closure $setCallback)
+    {
+        $fieldset = new Field\Fieldset();
+
+        $this->html($fieldset->start($title))->plain();
+
+        $setCallback($this);
+
+        $this->html($fieldset->end())->plain();
+
+        return $fieldset;
     }
 
     /**
@@ -996,10 +1116,11 @@ class Form
      *
      * @return MessageBag|bool
      */
-    protected function validationMessages($input)
+    public function validationMessages($input)
     {
         $failedValidators = [];
 
+        /** @var Field $field */
         foreach ($this->builder->fields() as $field) {
             if (!$validator = $field->getValidator($input)) {
                 continue;
@@ -1042,16 +1163,17 @@ class Form
     {
         $relations = $columns = [];
 
+        /** @var Field $field */
         foreach ($this->builder->fields() as $field) {
             $columns[] = $field->column();
         }
 
-        foreach (array_flatten($columns) as $column) {
-            if (str_contains($column, '.')) {
+        foreach (Arr::flatten($columns) as $column) {
+            if (Str::contains($column, '.')) {
                 list($relation) = explode('.', $column);
 
                 if (method_exists($this->model, $relation) &&
-                    $this->model->$relation() instanceof Relation
+                    $this->model->$relation() instanceof Relations\Relation
                 ) {
                     $relations[] = $relation;
                 }
@@ -1152,13 +1274,31 @@ class Form
     }
 
     /**
+     * @param Closure|null $callback
+     *
+     * @return Form\Tools
+     */
+    public function header(Closure $callback = null)
+    {
+        if (func_num_args() == 0) {
+            return $this->builder->getTools();
+        }
+
+        $callback->call($this, $this->builder->getTools());
+    }
+
+    /**
      * Disable form submit.
      *
+     * @param bool $disable
+     *
      * @return $this
+     *
+     * @deprecated
      */
-    public function disableSubmit()
+    public function disableSubmit(bool $disable = true)
     {
-        $this->builder()->options(['enableSubmit' => false]);
+        $this->builder()->getFooter()->disableSubmit($disable);
 
         return $this;
     }
@@ -1166,13 +1306,73 @@ class Form
     /**
      * Disable form reset.
      *
+     * @param bool $disable
+     *
      * @return $this
+     *
+     * @deprecated
      */
-    public function disableReset()
+    public function disableReset(bool $disable = true)
     {
-        $this->builder()->options(['enableReset' => false]);
+        $this->builder()->getFooter()->disableReset($disable);
 
         return $this;
+    }
+
+    /**
+     * Disable View Checkbox on footer.
+     *
+     * @param bool $disable
+     *
+     * @return $this
+     */
+    public function disableViewCheck(bool $disable = true)
+    {
+        $this->builder()->getFooter()->disableViewCheck($disable);
+
+        return $this;
+    }
+
+    /**
+     * Disable Editing Checkbox on footer.
+     *
+     * @param bool $disable
+     *
+     * @return $this
+     */
+    public function disableEditingCheck(bool $disable = true)
+    {
+        $this->builder()->getFooter()->disableEditingCheck($disable);
+
+        return $this;
+    }
+
+    /**
+     * Disable Creating Checkbox on footer.
+     *
+     * @param bool $disable
+     *
+     * @return $this
+     */
+    public function disableCreatingCheck(bool $disable = true)
+    {
+        $this->builder()->getFooter()->disableCreatingCheck($disable);
+
+        return $this;
+    }
+
+    /**
+     * Footer setting for form.
+     *
+     * @param Closure $callback
+     */
+    public function footer(Closure $callback = null)
+    {
+        if (func_num_args() == 0) {
+            return $this->builder()->getFooter();
+        }
+
+        call_user_func($callback, $this->builder()->getFooter());
     }
 
     /**
@@ -1188,10 +1388,6 @@ class Form
 
         if ($slice != 0) {
             $segments = array_slice($segments, 0, $slice);
-        }
-        // # fix #1768
-        if ($segments[0] == 'http:' && config('admin.secure') == true) {
-            $segments[0] = 'https:';
         }
 
         return implode('/', $segments);
@@ -1222,10 +1418,10 @@ class Form
     public function input($key, $value = null)
     {
         if (is_null($value)) {
-            return array_get($this->inputs, $key);
+            return Arr::get($this->inputs, $key);
         }
 
-        return array_set($this->inputs, $key, $value);
+        return Arr::set($this->inputs, $key, $value);
     }
 
     /**
@@ -1236,52 +1432,53 @@ class Form
     public static function registerBuiltinFields()
     {
         $map = [
-            'button'         => \Encore\Admin\Form\Field\Button::class,
-            'checkbox'       => \Encore\Admin\Form\Field\Checkbox::class,
-            'color'          => \Encore\Admin\Form\Field\Color::class,
-            'currency'       => \Encore\Admin\Form\Field\Currency::class,
-            'date'           => \Encore\Admin\Form\Field\Date::class,
-            'dateRange'      => \Encore\Admin\Form\Field\DateRange::class,
-            'datetime'       => \Encore\Admin\Form\Field\Datetime::class,
-            'dateTimeRange'  => \Encore\Admin\Form\Field\DatetimeRange::class,
-            'datetimeRange'  => \Encore\Admin\Form\Field\DatetimeRange::class,
-            'decimal'        => \Encore\Admin\Form\Field\Decimal::class,
-            'display'        => \Encore\Admin\Form\Field\Display::class,
-            'divider'        => \Encore\Admin\Form\Field\Divide::class,
-            'divide'         => \Encore\Admin\Form\Field\Divide::class,
-            'embeds'         => \Encore\Admin\Form\Field\Embeds::class,
-            'editor'         => \Encore\Admin\Form\Field\Editor::class,
-            'email'          => \Encore\Admin\Form\Field\Email::class,
-            'file'           => \Encore\Admin\Form\Field\File::class,
-            'hasMany'        => \Encore\Admin\Form\Field\HasMany::class,
-            'hidden'         => \Encore\Admin\Form\Field\Hidden::class,
-            'id'             => \Encore\Admin\Form\Field\Id::class,
-            'image'          => \Encore\Admin\Form\Field\Image::class,
-            'ip'             => \Encore\Admin\Form\Field\Ip::class,
-            'map'            => \Encore\Admin\Form\Field\Map::class,
-            'mobile'         => \Encore\Admin\Form\Field\Mobile::class,
-            'month'          => \Encore\Admin\Form\Field\Month::class,
-            'multipleSelect' => \Encore\Admin\Form\Field\MultipleSelect::class,
-            'number'         => \Encore\Admin\Form\Field\Number::class,
-            'password'       => \Encore\Admin\Form\Field\Password::class,
-            'radio'          => \Encore\Admin\Form\Field\Radio::class,
-            'rate'           => \Encore\Admin\Form\Field\Rate::class,
-            'select'         => \Encore\Admin\Form\Field\Select::class,
-            'slider'         => \Encore\Admin\Form\Field\Slider::class,
-            'switch'         => \Encore\Admin\Form\Field\SwitchField::class,
-            'text'           => \Encore\Admin\Form\Field\Text::class,
-            'textarea'       => \Encore\Admin\Form\Field\Textarea::class,
-            'time'           => \Encore\Admin\Form\Field\Time::class,
-            'timeRange'      => \Encore\Admin\Form\Field\TimeRange::class,
-            'url'            => \Encore\Admin\Form\Field\Url::class,
-            'year'           => \Encore\Admin\Form\Field\Year::class,
-            'html'           => \Encore\Admin\Form\Field\Html::class,
-            'tags'           => \Encore\Admin\Form\Field\Tags::class,
-            'icon'           => \Encore\Admin\Form\Field\Icon::class,
-            'multipleFile'   => \Encore\Admin\Form\Field\MultipleFile::class,
-            'multipleImage'  => \Encore\Admin\Form\Field\MultipleImage::class,
-            'captcha'        => \Encore\Admin\Form\Field\Captcha::class,
-            'listbox'        => \Encore\Admin\Form\Field\Listbox::class,
+            'button'         => Field\Button::class,
+            'checkbox'       => Field\Checkbox::class,
+            'color'          => Field\Color::class,
+            'currency'       => Field\Currency::class,
+            'date'           => Field\Date::class,
+            'dateRange'      => Field\DateRange::class,
+            'datetime'       => Field\Datetime::class,
+            'dateTimeRange'  => Field\DatetimeRange::class,
+            'datetimeRange'  => Field\DatetimeRange::class,
+            'decimal'        => Field\Decimal::class,
+            'display'        => Field\Display::class,
+            'divider'        => Field\Divider::class,
+            'embeds'         => Field\Embeds::class,
+            'email'          => Field\Email::class,
+            'file'           => Field\File::class,
+            'hasMany'        => Field\HasMany::class,
+            'hidden'         => Field\Hidden::class,
+            'id'             => Field\Id::class,
+            'image'          => Field\Image::class,
+            'ip'             => Field\Ip::class,
+            'mobile'         => Field\Mobile::class,
+            'month'          => Field\Month::class,
+            'multipleSelect' => Field\MultipleSelect::class,
+            'number'         => Field\Number::class,
+            'password'       => Field\Password::class,
+            'radio'          => Field\Radio::class,
+            'rate'           => Field\Rate::class,
+            'select'         => Field\Select::class,
+            'slider'         => Field\Slider::class,
+            'switch'         => Field\SwitchField::class,
+            'text'           => Field\Text::class,
+            'textarea'       => Field\Textarea::class,
+            'time'           => Field\Time::class,
+            'timeRange'      => Field\TimeRange::class,
+            'url'            => Field\Url::class,
+            'year'           => Field\Year::class,
+            'html'           => Field\Html::class,
+            'tags'           => Field\Tags::class,
+            'icon'           => Field\Icon::class,
+            'multipleFile'   => Field\MultipleFile::class,
+            'multipleImage'  => Field\MultipleImage::class,
+            'captcha'        => Field\Captcha::class,
+            'listbox'        => Field\Listbox::class,
+            'table'          => Field\Table::class,
+            'timezone'       => Field\Timezone::class,
+            'keyValue'       => Field\KeyValue::class,
+            'list'           => Field\ListField::class,
         ];
 
         foreach ($map as $abstract => $class) {
@@ -1303,13 +1500,26 @@ class Form
     }
 
     /**
+     * Set form field alias.
+     *
+     * @param string $field
+     * @param string $alias
+     *
+     * @return void
+     */
+    public static function alias($field, $alias)
+    {
+        static::$fieldAlias[$alias] = $field;
+    }
+
+    /**
      * Remove registered field.
      *
      * @param array|string $abstract
      */
     public static function forget($abstract)
     {
-        array_forget(static::$availableFields, $abstract);
+        Arr::forget(static::$availableFields, $abstract);
     }
 
     /**
@@ -1321,7 +1531,12 @@ class Form
      */
     public static function findFieldClass($method)
     {
-        $class = array_get(static::$availableFields, $method);
+        // If alias exists.
+        if (isset(static::$fieldAlias[$method])) {
+            $method = static::$fieldAlias[$method];
+        }
+
+        $class = Arr::get(static::$availableFields, $method);
 
         if (class_exists($class)) {
             return $class;
@@ -1351,8 +1566,8 @@ class Form
 
             $assets = call_user_func([$field, 'getAssets']);
 
-            $css->push(array_get($assets, 'css'));
-            $js->push(array_get($assets, 'js'));
+            $css->push(Arr::get($assets, 'css'));
+            $js->push(Arr::get($assets, 'js'));
         }
 
         return static::$collectedAssets = [
@@ -1377,11 +1592,13 @@ class Form
      * Setter.
      *
      * @param string $name
-     * @param $value
+     * @param mixed  $value
+     *
+     * @return array
      */
     public function __set($name, $value)
     {
-        $this->input($name, $value);
+        return Arr::set($this->inputs, $name, $value);
     }
 
     /**
@@ -1390,12 +1607,12 @@ class Form
      * @param string $method
      * @param array  $arguments
      *
-     * @return Field|void
+     * @return Field
      */
     public function __call($method, $arguments)
     {
         if ($className = static::findFieldClass($method)) {
-            $column = array_get($arguments, 0, ''); //[0];
+            $column = Arr::get($arguments, 0, ''); //[0];
 
             $element = new $className($column, array_slice($arguments, 1));
 
@@ -1403,15 +1620,9 @@ class Form
 
             return $element;
         }
-    }
 
-    /**
-     * Render the contents of the form when casting to string.
-     *
-     * @return string
-     */
-    public function __toString()
-    {
-        return $this->render();
+        admin_error('Error', "Field type [$method] does not exist.");
+
+        return new Field\Nullable();
     }
 }

@@ -3,8 +3,8 @@
 namespace Encore\Admin\Console;
 
 use Illuminate\Console\GeneratorCommand;
-use Symfony\Component\Console\Input\InputArgument;
-use Symfony\Component\Console\Input\InputOption;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Str;
 
 class MakeCommand extends GeneratorCommand
 {
@@ -13,14 +13,24 @@ class MakeCommand extends GeneratorCommand
      *
      * @var string
      */
-    protected $name = 'admin:make';
+    protected $signature = 'admin:make {name} 
+        {--model=} 
+        {--title=} 
+        {--stub= : Path to the custom stub file. } 
+        {--namespace=} 
+        {--O|output}';
 
     /**
      * The console command description.
      *
      * @var string
      */
-    protected $description = 'Make empty admin controller';
+    protected $description = 'Make admin controller';
+
+    /**
+     * @var ResourceGenerator
+     */
+    protected $generator;
 
     /**
      * Execute the console command.
@@ -35,7 +45,44 @@ class MakeCommand extends GeneratorCommand
             return false;
         }
 
-        parent::handle();
+        $stub = $this->option('stub');
+
+        if ($stub and !is_file($stub)) {
+            $this->error('The stub file dose not exist.');
+
+            return false;
+        }
+
+        $modelName = $this->option('model');
+
+        $this->generator = new ResourceGenerator($modelName);
+
+        if ($this->option('output')) {
+            return $this->output($modelName);
+        }
+
+        if (parent::handle() !== false) {
+            $name = $this->argument('name');
+            $path = Str::plural(Str::kebab(class_basename($this->option('model'))));
+
+            $this->line('');
+            $this->comment('Add the following route to app/Admin/routes.php:');
+            $this->line('');
+            $this->info("    \$router->resource('{$path}', {$name}::class);");
+            $this->line('');
+        }
+    }
+
+    /**
+     * @param string $modelName
+     */
+    protected function output($modelName)
+    {
+        $this->alert("laravel-admin controller code for model [{$modelName}]");
+
+        $this->info($this->generator->generateGrid());
+        $this->info($this->generator->generateShow());
+        $this->info($this->generator->generateForm());
     }
 
     /**
@@ -51,7 +98,7 @@ class MakeCommand extends GeneratorCommand
             return true;
         }
 
-        return class_exists($model);
+        return class_exists($model) && is_subclass_of($model, Model::class);
     }
 
     /**
@@ -67,10 +114,36 @@ class MakeCommand extends GeneratorCommand
         $stub = parent::replaceClass($stub, $name);
 
         return str_replace(
-            ['DummyModelNamespace', 'DummyModel'],
-            [$this->option('model'), class_basename($this->option('model'))],
+            [
+                'DummyModelNamespace',
+                'DummyTitle',
+                'DummyModel',
+                'DummyGrid',
+                'DummyShow',
+                'DummyForm',
+            ],
+            [
+                $this->option('model'),
+                $this->option('title') ?: $this->option('model'),
+                class_basename($this->option('model')),
+                $this->indentCodes($this->generator->generateGrid()),
+                $this->indentCodes($this->generator->generateShow()),
+                $this->indentCodes($this->generator->generateForm()),
+            ],
             $stub
         );
+    }
+
+    /**
+     * @param string $code
+     *
+     * @return string
+     */
+    protected function indentCodes($code)
+    {
+        $indent = str_repeat(' ', 8);
+
+        return rtrim($indent.preg_replace("/\r\n/", "\r\n{$indent}", $code));
     }
 
     /**
@@ -80,6 +153,10 @@ class MakeCommand extends GeneratorCommand
      */
     protected function getStub()
     {
+        if ($stub = $this->option('stub')) {
+            return $stub;
+        }
+
         if ($this->option('model')) {
             return __DIR__.'/stubs/controller.stub';
         }
@@ -96,35 +173,24 @@ class MakeCommand extends GeneratorCommand
      */
     protected function getDefaultNamespace($rootNamespace)
     {
-        $directory = config('admin.directory');
+        if ($namespace = $this->option('namespace')) {
+            return $namespace;
+        }
 
-        $namespace = ucfirst(basename($directory));
-
-        return $rootNamespace."\\$namespace\Controllers";
+        return config('admin.route.namespace');
     }
 
     /**
-     * Get the console command arguments.
+     * Get the desired class name from the input.
      *
-     * @return array
+     * @return string
      */
-    protected function getArguments()
+    protected function getNameInput()
     {
-        return [
-            ['name', InputArgument::REQUIRED, 'The name of the controller.'],
-        ];
-    }
+        $name = trim($this->argument('name'));
 
-    /**
-     * Get the console command options.
-     *
-     * @return array
-     */
-    protected function getOptions()
-    {
-        return [
-            ['model', null, InputOption::VALUE_REQUIRED,
-                'The eloquent model that should be use as controller data source.', ],
-        ];
+        $this->type = $this->qualifyClass($name);
+
+        return $name;
     }
 }

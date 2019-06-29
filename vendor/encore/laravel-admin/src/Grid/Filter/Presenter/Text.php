@@ -42,6 +42,7 @@ class Text extends Presenter
             'placeholder' => $this->placeholder,
             'icon'        => $this->icon,
             'type'        => $this->type,
+            'group'       => $this->filter->group,
         ];
     }
 
@@ -161,7 +162,7 @@ class Text extends Presenter
     {
         $options = json_encode($options);
 
-        Admin::script("$('#filter-modal input.{$this->filter->getId()}').inputmask($options);");
+        Admin::script("$('#filter-box input.{$this->filter->getId()}').inputmask($options);");
 
         $this->icon = $icon;
 

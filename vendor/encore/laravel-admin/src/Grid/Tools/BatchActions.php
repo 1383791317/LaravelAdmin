@@ -18,6 +18,11 @@ class BatchActions extends AbstractTool
     protected $enableDelete = true;
 
     /**
+     * @var bool
+     */
+    private $isHoldSelectAllCheckbox = false;
+
+    /**
      * BatchActions constructor.
      */
     public function __construct()
@@ -34,7 +39,7 @@ class BatchActions extends AbstractTool
      */
     protected function appendDefaultAction()
     {
-        $this->add(trans('admin.delete'), new BatchDelete());
+        $this->add(new BatchDelete(trans('admin.batch_delete')));
     }
 
     /**
@@ -42,9 +47,23 @@ class BatchActions extends AbstractTool
      *
      * @return $this
      */
-    public function disableDelete()
+    public function disableDelete(bool $disable = true)
+    {
+        $this->enableDelete = !$disable;
+
+        return $this;
+    }
+
+    /**
+     * Disable delete And Hode SelectAll Checkbox.
+     *
+     * @return $this
+     */
+    public function disableDeleteAndHodeSelectAll()
     {
         $this->enableDelete = false;
+
+        $this->isHoldSelectAllCheckbox = true;
 
         return $this;
     }
@@ -52,18 +71,24 @@ class BatchActions extends AbstractTool
     /**
      * Add a batch action.
      *
-     * @param string      $title
-     * @param BatchAction $abstract
+     * @param $title
+     * @param BatchAction|null $action
      *
      * @return $this
      */
-    public function add($title, BatchAction $abstract)
+    public function add($title, BatchAction $action = null)
     {
         $id = $this->actions->count();
 
-        $abstract->setId($id);
+        if (func_num_args() == 1) {
+            $action = $title;
+            $action->setId($id);
+        } elseif (func_num_args() == 2) {
+            $action->setId($id);
+            $action->setTitle($title);
+        }
 
-        $this->actions->push(compact('id', 'title', 'abstract'));
+        $this->actions->push($action);
 
         return $this;
     }
@@ -78,10 +103,9 @@ class BatchActions extends AbstractTool
         Admin::script($this->script());
 
         foreach ($this->actions as $action) {
-            $abstract = $action['abstract'];
-            $abstract->setResource($this->grid->resource());
+            $action->setGrid($this->grid);
 
-            Admin::script($abstract->script());
+            Admin::script($action->script());
         }
     }
 
@@ -92,16 +116,40 @@ class BatchActions extends AbstractTool
      */
     protected function script()
     {
-        return <<<'EOT'
+        $allName = $this->grid->getSelectAllName();
+        $rowName = $this->grid->getGridRowName();
 
-$('.grid-select-all').iCheck({checkboxClass:'icheckbox_minimal-blue'});
+        $selected = trans('admin.grid_items_selected');
 
-$('.grid-select-all').on('ifChanged', function(event) {
+        return <<<EOT
+
+$('.{$allName}').iCheck({checkboxClass:'icheckbox_minimal-blue'});
+
+$('.{$allName}').on('ifChanged', function(event) {
     if (this.checked) {
-        $('.grid-row-checkbox').iCheck('check');
+        $('.{$rowName}-checkbox').iCheck('check');
     } else {
-        $('.grid-row-checkbox').iCheck('uncheck');
+        $('.{$rowName}-checkbox').iCheck('uncheck');
     }
+}).on('ifClicked', function () {
+    if (this.checked) {
+        $.admin.grid.selects = {};
+    } else {
+        $('.{$rowName}-checkbox').each(function () {
+            var id = $(this).data('id');
+            $.admin.grid.select(id);
+        });
+    }
+
+    var selected = $.admin.grid.selected().length;
+    
+    if (selected > 0) {
+        $('.{$allName}-btn').show();
+    } else {
+        $('.{$allName}-btn').hide();
+    }
+    
+    $('.{$allName}-btn .selected').html("{$selected}".replace('{n}', selected));
 });
 
 EOT;
@@ -124,6 +172,12 @@ EOT;
 
         $this->setUpScripts();
 
-        return view('admin::grid.batch-actions', ['actions' => $this->actions])->render();
+        $data = [
+            'actions'                 => $this->actions,
+            'selectAllName'           => $this->grid->getSelectAllName(),
+            'isHoldSelectAllCheckbox' => $this->isHoldSelectAllCheckbox,
+        ];
+
+        return view('admin::grid.batch-actions', $data)->render();
     }
 }

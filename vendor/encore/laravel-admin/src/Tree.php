@@ -219,12 +219,14 @@ class Tree implements Renderable
      */
     protected function script()
     {
-        $deleteConfirm = trans('admin.delete_confirm');
-        $saveSucceeded = trans('admin.save_succeeded');
-        $refreshSucceeded = trans('admin.refresh_succeeded');
-        $deleteSucceeded = trans('admin.delete_succeeded');
-        $confirm = trans('admin.confirm');
-        $cancel = trans('admin.cancel');
+        $trans = [
+            'delete_confirm'    => trans('admin.delete_confirm'),
+            'save_succeeded'    => trans('admin.save_succeeded'),
+            'refresh_succeeded' => trans('admin.refresh_succeeded'),
+            'delete_succeeded'  => trans('admin.delete_succeeded'),
+            'confirm'           => trans('admin.confirm'),
+            'cancel'            => trans('admin.cancel'),
+        ];
 
         $nestableOptions = json_encode($this->nestableOptions);
 
@@ -235,34 +237,39 @@ class Tree implements Renderable
         $('.tree_branch_delete').click(function() {
             var id = $(this).data('id');
             swal({
-              title: "$deleteConfirm",
-              type: "warning",
-              showCancelButton: true,
-              confirmButtonColor: "#DD6B55",
-              confirmButtonText: "$confirm",
-              closeOnConfirm: false,
-              cancelButtonText: "$cancel"
-            },
-            function(){
-                $.ajax({
-                    method: 'post',
-                    url: '{$this->path}/' + id,
-                    data: {
-                        _method:'delete',
-                        _token:LA.token,
-                    },
-                    success: function (data) {
-                        $.pjax.reload('#pjax-container');
-
-                        if (typeof data === 'object') {
-                            if (data.status) {
-                                swal(data.message, '', 'success');
-                            } else {
-                                swal(data.message, '', 'error');
+                title: "{$trans['delete_confirm']}",
+                type: "warning",
+                showCancelButton: true,
+                confirmButtonColor: "#DD6B55",
+                confirmButtonText: "{$trans['confirm']}",
+                showLoaderOnConfirm: true,
+                cancelButtonText: "{$trans['cancel']}",
+                preConfirm: function() {
+                    return new Promise(function(resolve) {
+                        $.ajax({
+                            method: 'post',
+                            url: '{$this->path}/' + id,
+                            data: {
+                                _method:'delete',
+                                _token:LA.token,
+                            },
+                            success: function (data) {
+                                $.pjax.reload('#pjax-container');
+                                toastr.success('{$trans['delete_succeeded']}');
+                                resolve(data);
                             }
-                        }
+                        });
+                    });
+                }
+            }).then(function(result) {
+                var data = result.value;
+                if (typeof data === 'object') {
+                    if (data.status) {
+                        swal(data.message, '', 'success');
+                    } else {
+                        swal(data.message, '', 'error');
                     }
-                });
+                }
             });
         });
 
@@ -275,18 +282,17 @@ class Tree implements Renderable
             },
             function(data){
                 $.pjax.reload('#pjax-container');
-                toastr.success('{$saveSucceeded}');
+                toastr.success('{$trans['save_succeeded']}');
             });
         });
 
         $('.{$this->elementId}-refresh').click(function () {
             $.pjax.reload('#pjax-container');
-            toastr.success('{$refreshSucceeded}');
+            toastr.success('{$trans['refresh_succeeded']}');
         });
 
         $('.{$this->elementId}-tree-tools').on('click', function(e){
-            var target = $(e.target),
-                action = target.data('action');
+            var action = $(this).data('action');
             if (action === 'expand') {
                 $('.dd').nestable('expandAll');
             }
